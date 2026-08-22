@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "loopscope"
 version = "0.1.0b1"
-description = "Live view of LangGraph state graphs and Ralph loops"
+description = "Local live dashboard for LangGraph graphs and Ralph loops"
 readme = "README.md"
 license = {text = "Apache-2.0"}
 authors = [

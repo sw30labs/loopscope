@@ -1,15 +1,32 @@
 # loopscope
 
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org)
+[![LangGraph](https://img.shields.io/badge/LangGraph-optional-1C3C3C)](https://github.com/langchain-ai/langgraph)
+[![Status](https://img.shields.io/badge/status-0.1%20Beta-yellow)](https://github.com/sw30labs/loopscope/releases/tag/v0.1.0-beta)
+[![Local](https://img.shields.io/badge/cloud-none-blue)](#notes-and-limits)
+[![License](https://img.shields.io/badge/License-Apache_2.0-green.svg)](LICENSE)
+
+A local live dashboard for **LangGraph** state graphs and **Ralph** loops
+(retry-until-done: plan / edit / test until a number hits zero).
+
+Your agent is already running. loopscope sits in the same process, opens
+`http://127.0.0.1:7788`, and shows the run as it happens: which node is hot,
+how the graph is wired, whether this pass is better than the last, and a
+colour-coded feed of tools and models. One hook. No collector, no database,
+no accounts.
+
+It does not rewrite the graph. It does not wrap your nodes. Forget the hook
+and the agent still runs — the dashboard just stays empty.
+
+**0.1 Beta.** Loopback only; there is no auth.
+
 ![loopscope dashboard](docs/preview-loopscope.gif)
 
-**0.1 Beta.** Live view of LangGraph state graphs and Ralph loops. One `pip install`, one line
-of setup, no collector, no database, no accounts.
-
-![A Ralph loop mid-run](docs/preview-ralph-loop.png)
-
-## Run it in 30 seconds
+## Quick start
 
 ```bash
+git clone https://github.com/sw30labs/loopscope.git
+cd loopscope
 ./setup_and_run.sh                 # venv + tests + Ralph demo → http://localhost:7788
 ./setup_and_run.sh --langgraph     # cyclic graph
 ./setup_and_run.sh --combo         # Ralph loop driving the graph
@@ -19,13 +36,12 @@ of setup, no collector, no database, no accounts.
 Or by hand:
 
 ```bash
-cd loopscope
 python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 python examples/ralph_demo.py                          # → http://localhost:7788
 ```
 
-That example needs nothing but the three packages above. For the LangGraph one:
+The Ralph demo needs nothing but FastAPI, uvicorn, and websockets. For LangGraph:
 
 ```bash
 pip install langgraph
@@ -42,36 +58,10 @@ Installing the package itself is optional — the examples add the repo root to
 pip install -e .
 ```
 
-## What it shows
+## Hook it into a graph you already have
 
-**The mesh** — your nodes as a constellation. The busiest node (a supervisor,
-an orchestrator, whatever everything routes through) becomes the hub; the rest
-orbit it. A plain cycle has no such node, so a Ralph loop puts its objective and
-pass counter in the middle instead. Each node carries a ring showing its share
-of the run's time, a status pill, and a subtitle taken from its docstring. When
-control moves, a dot rides the link it moved along.
-
-**Stage stepper** — the graph's layers as numbered stages, with the one
-currently executing lit.
-
-**Pipeline / Queue** — where the run is spending its time, passes remaining,
-revisits inside the current pass, errors.
-
-**Passes** — one column per pass, one row per node. Skipped nodes leave gaps,
-revisits show a count, and the bar under each column is your convergence
-signal, coloured red at the worst value seen and green at zero. Twenty passes
-read as a fabric: convergence is a staircase, thrashing is noise. Single-pass
-runs get a throughput chart here instead.
-
-**Live feed** — timestamped node, tool and model lines, colour-coded per node.
-
-**System** — node runs, average and slowest, edges exercised, error rate, and
-why the run stopped.
-
-## LangGraph
-
-Hooking this into a graph you already have: [QUICKSTART-INTEGRATION.md](QUICKSTART-INTEGRATION.md).
-In VS Code / Grok, from that project: `/loopscope-hook`.
+[QUICKSTART-INTEGRATION.md](QUICKSTART-INTEGRATION.md) is the hand recipe.
+In VS Code / Grok, from **that** project: `/loopscope-hook`.
 
 ```python
 import loopscope
@@ -151,7 +141,7 @@ for it in loop:
         it.done("good enough")
 ```
 
-## Recording and replay
+## Record and replay
 
 ```python
 loopscope.start(jsonl="runs/tonight.jsonl")
@@ -164,14 +154,40 @@ python -m loopscope.replay runs/tonight.jsonl --speed 8
 Overnight loops finish while you are asleep; the replay plays back at whatever
 speed you can stand.
 
-## Anything else
-
 Any loop at all can push to the same dashboard:
 
 ```python
 loopscope.log("compaction finished", level="warn")
 loopscope.metric("open_todos", 14)
 ```
+
+## What you see
+
+![A Ralph loop mid-run](docs/preview-ralph-loop.png)
+
+**The mesh** — your nodes as a constellation. The busiest node (a supervisor,
+an orchestrator, whatever everything routes through) becomes the hub; the rest
+orbit it. A plain cycle has no such node, so a Ralph loop puts its objective and
+pass counter in the middle instead. Each node carries a ring showing its share
+of the run's time, a status pill, and a subtitle taken from its docstring. When
+control moves, a dot rides the link it moved along.
+
+**Stage stepper** — the graph's layers as numbered stages, with the one
+currently executing lit.
+
+**Pipeline / Queue** — where the run is spending its time, passes remaining,
+revisits inside the current pass, errors.
+
+**Passes** — one column per pass, one row per node. Skipped nodes leave gaps,
+revisits show a count, and the bar under each column is your convergence
+signal, coloured red at the worst value seen and green at zero. Twenty passes
+read as a fabric: convergence is a staircase, thrashing is noise. Single-pass
+runs get a throughput chart here instead.
+
+**Live feed** — timestamped node, tool and model lines, colour-coded per node.
+
+**System** — node runs, average and slowest, edges exercised, error rate, and
+why the run stopped.
 
 ## How it fits together
 
@@ -193,36 +209,7 @@ your code ──► EventBus ──► websocket ──► dashboard
 - `raise_error = False` on the handler and swallowed exceptions in `publish()`:
   a broken dashboard must never take down the run it is watching.
 
-## Files
-
-```
-README.md
-QUICKSTART-INTEGRATION.md   drop-in hook for an existing LangGraph app
-skills/loopscope-hook/      VS Code / Grok skill: wire it from another repo
-setup_and_run.sh      venv, tests, demo dashboard
-pyproject.toml
-requirements.txt
-LICENSE
-docs/                 dashboard GIF and screenshots
-loopscope/
-  events.py     event vocabulary, state summarising, truncation
-  bus.py        thread-safe pub/sub with replay buffer
-  layout.py     cycle-aware layering + radial mesh placement
-  topology.py   packs nodes, edges, colours, stages into one event
-  server.py     FastAPI + websocket + background thread
-  langgraph.py  topology extraction + callback handler
-  ralph.py      iteration protocol, phases, stall detection
-  replay.py     JSONL playback
-  static/dashboard.html
-examples/
-  ralph_demo.py       Ralph loop, no LangGraph needed
-  langgraph_demo.py   cyclic graph; `ralph` argument for the combo
-```
-
-## Ports
-
-Everything defaults to `127.0.0.1:7788`. Change it with `loopscope.start(port=...)`
-if something else already has it.
+Default bind is `127.0.0.1:7788`. Change it with `loopscope.start(port=...)`.
 
 ## Notes and limits
 
