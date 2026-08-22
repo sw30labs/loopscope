@@ -1,0 +1,5 @@
+fastapi>=0.110
+uvicorn>=0.27
+websockets>=12
+# optional, only needed for the LangGraph hook and its example
+# langgraph>=0.2

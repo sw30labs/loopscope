@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "loopscope"
+version = "0.1.0b1"
+description = "Live view of LangGraph state graphs and Ralph loops"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+authors = [
+    {name = "Nicolas Cravino", email = "spidernic@me.com"},
+]
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+    "websockets>=12",
+]
+
+[project.urls]
+Homepage = "https://github.com/sw30labs/loopscope"
+Repository = "https://github.com/sw30labs/loopscope"
+Issues = "https://github.com/sw30labs/loopscope/issues"
+
+[project.optional-dependencies]
+langgraph = ["langgraph>=0.2", "langchain-core>=0.3"]
+dev = ["pytest>=8"]
+
+[project.scripts]
+loopscope-replay = "loopscope.replay:main"
+
+[tool.setuptools.packages.find]
+include = ["loopscope*"]
+
+[tool.setuptools.package-data]
+loopscope = ["static/*.html"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
