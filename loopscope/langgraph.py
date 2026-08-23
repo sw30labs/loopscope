@@ -536,6 +536,7 @@ class LoopScopeCallback(BaseCallbackHandler):
                 step = metadata.get("langgraph_step")
                 self._open[str(run_id)] = {"node": node, "t0": time.perf_counter(), "step": step}
                 last = self._last_node
+                self._last_node = node
             elif parent_run_id is None and not (metadata or {}).get("langgraph_node"):
                 self._root = str(run_id)
                 self._last_node = None

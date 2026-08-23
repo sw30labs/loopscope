@@ -166,9 +166,9 @@
   .agent-row .cnt { text-align: right; font-weight: 700; font-variant-numeric: tabular-nums; font-size: 11px; }
 
   [hidden] { display: none !important; }
-  #bars { display: flex; align-items: flex-end; justify-content: flex-start; gap: 4px; height: 92px; }
-  .bucket { display: flex; align-items: flex-end; gap: 1px; height: 100%; width: 13px; flex: none; }
-  .bucket i { flex: 1; min-width: 3px; border-radius: 2px 2px 0 0; min-height: 3px; }
+  #bars { display: flex; align-items: flex-end; justify-content: flex-start; gap: 1px; height: 92px; width: 100%; overflow: hidden; }
+  .bucket { display: flex; align-items: flex-end; gap: 1px; height: 100%; flex: 1 1 0; min-width: 0; }
+  .bucket i { flex: 1; min-width: 0; border-radius: 2px 2px 0 0; min-height: 2px; }
   .legend { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 10px; }
   .legend span { display: flex; align-items: center; gap: 5px; font-size: 9px; letter-spacing: .1em; text-transform: uppercase; color: var(--faint); }
   .legend i { width: 6px; height: 6px; border-radius: 50%; }
@@ -301,7 +301,7 @@
     </section>
 
     <section class="card">
-      <h2><span id="mid-title">Throughput</span> <span class="lbl right" id="mid-note">completions · last 60s</span></h2>
+      <h2><span id="mid-title">Throughput</span> <span class="lbl right" id="mid-note">activity · last 60s</span></h2
       <div class="body" id="mid-body">
         <div id="bars"></div>
         <div class="legend" id="legend"></div>
@@ -456,7 +456,14 @@
     el("title").textContent = S.title;
   }
 
+  // A nested attach() (subgraph invoke) publishes its own topology/run_id.
+  // Keep the parent mesh; the feed still shows those events.
+  function liveForeign(e) {
+    return !!(S.runId && e.run_id && e.run_id !== S.runId && S.startedAt && !S.endedAt);
+  }
+
   function onTopology(e) {
+    if (liveForeign(e)) return;
     if (e.run_id !== S.runId) reset(e.run_id, e.title);
     S.nodes = e.nodes || [];
     S.edges = e.edges || [];
@@ -483,6 +490,10 @@
   }
 
   function onRunStart(e) {
+    if (liveForeign(e)) {
+      feed(e, null, "run", `${e.title || e.run_id} started`);
+      return;
+    }
     if (e.run_id !== S.runId) reset(e.run_id, e.title);
     S.startedAt = (typeof e.ts === "number" ? e.ts * 1000 : Date.now());
     S.maxIters = e.max_iters || S.maxIters;
@@ -490,15 +501,20 @@
   }
 
   function onRunEnd(e) {
+    const bad = e.status === "error" || (e.status && /stall|timeout/.test(e.status));
+    const note = `${e.status || "finished"}${e.iterations ? " · " + e.iterations + (e.iterations === 1 ? " pass" : " passes") : ""}`;
+    if (e.run_id !== S.runId) {
+      feed(e, null, "run", note, bad ? "bad" : "");
+      return;
+    }
     S.endedAt = typeof e.ts === "number" ? e.ts * 1000 : Date.now();
     S.stopReason = e.status || "finished";
     Object.values(S.status).forEach((s) => { if (s.state === "running") s.state = "done"; });
-    const bad = e.status === "error" || (e.status && /stall|timeout/.test(e.status));
-    feed(e, null, "run", `${S.stopReason}${e.iterations ? " · " + e.iterations + (e.iterations === 1 ? " pass" : " passes") : ""}`,
-         bad ? "bad" : "");
+    feed(e, null, "run", note, bad ? "bad" : "");
   }
 
   function onIterStart(e) {
+    if (liveForeign(e)) return;
     S.current = e.iteration;
     S.maxIters = e.max_iters || S.maxIters;
     if (!S.iterations.has(e.iteration)) S.iterations.set(e.iteration, { cells: {}, signal: null, status: "run" });
@@ -506,6 +522,7 @@
   }
 
   function onIterEnd(e) {
+    if (liveForeign(e)) return;
     const it = S.iterations.get(e.iteration);
     if (!it) return;
     it.status = e.status === "error" ? "err" : "done";
@@ -515,12 +532,18 @@
   }
 
   function onNodeStart(e) {
+    if (liveForeign(e)) return;
     const s = stat(e.node);
     s.state = "running";
     s.activity = "running";
+    bucketHit(e.node, e.ts);
   }
 
   function onNodeEnd(e) {
+    if (liveForeign(e)) {
+      feed(e, e.node, e.node, `${fmt(e.ms)}${(e.wrote && e.wrote.length) ? " → " + e.wrote.join(", ") : ""}`);
+      return;
+    }
     const s = stat(e.node);
     s.state = "done";
     s.hits += 1;
@@ -535,6 +558,10 @@
   }
 
   function onNodeError(e) {
+    if (liveForeign(e)) {
+      feed(e, e.node, e.node, e.error || "failed", "bad");
+      return;
+    }
     const s = stat(e.node);
     s.state = "error";
     s.hits += 1;
@@ -551,6 +578,7 @@
   }
 
   function onEdge(e) {
+    if (liveForeign(e)) return;
     if (!e.source || !e.target) return;
     const key = `${e.source}→${e.target}`;
     let path = S.linkIndex && S.linkIndex[key];
@@ -574,17 +602,21 @@
   }
 
   function onState(e) {
+    if (liveForeign(e)) return;
     if (e.keys && e.keys.length && e.node) stat(e.node).activity = "wrote " + e.keys.join(", ");
   }
 
   function onLog(e) {
     const cls = e.level === "error" ? "bad" : (e.level === "warn" ? "warn" : "");
-    if (e.node && e.text) stat(e.node).activity = e.text;
+    if (!liveForeign(e) && e.node && e.text) stat(e.node).activity = e.text;
+    const tick = liveForeign(e) ? runningId() : e.node;
+    if (tick) bucketHit(tick, e.ts);
     feed(e, e.node, e.node || e.level || "log", e.text, cls);
   }
 
   function onMetric(e) {
     if (e.name === "tokens") { S.tokens += e.total || e.value || 0; return; }
+    if (liveForeign(e)) return;
     if (!e.signal) return;
     const it = S.iterations.get(e.iteration || S.current);
     if (it && typeof e.value === "number") {
@@ -610,15 +642,32 @@
     return it.cells[e.node];
   }
 
+  function runningId() {
+    const hit = Object.entries(S.status).find(([, s]) => s.state === "running");
+    return hit ? hit[0] : null;
+  }
+
   function bucketHit(node, ts) {
+    if (!node) return;
     const sec = Math.floor(typeof ts === "number" ? ts : Date.now() / 1000);
     const last = S.buckets[S.buckets.length - 1];
     if (!last || last.t !== sec) {
       S.buckets.push({ t: sec, by: {} });
-      while (S.buckets.length > BUCKETS) S.buckets.shift();
+      while (S.buckets.length > BUCKETS * 2) S.buckets.shift();
     }
     const b = S.buckets[S.buckets.length - 1];
     b.by[node] = (b.by[node] || 0) + 1;
+  }
+
+  function bucketWindow() {
+    const byT = new Map(S.buckets.map((b) => [b.t, b]));
+    const lastT = S.endedAt
+      ? Math.floor(S.endedAt / 1000)
+      : Math.floor(Date.now() / 1000);
+    const start = lastT - (BUCKETS - 1);
+    const window = [];
+    for (let t = start; t <= lastT; t++) window.push(byT.get(t) || { t, by: {} });
+    return window;
   }
 
   function applyPositions() {
@@ -901,11 +950,15 @@
           (s && s.state === "running" ? " running" : "")
       );
       refs.arc.setAttribute("d", arcPath(refs.r + 5, s ? (s.total || 0) / busiest : 0));
-      refs.arc.setAttribute("opacity", s && s.hits ? 1 : 0.16);
+      const lit = !!(s && (s.hits || s.state === "running" || s.state === "error"));
+      refs.arc.setAttribute("opacity", lit ? 1 : 0.16);
       if (refs.pill) {
-        const label = !s || !s.hits
-          ? "idle"
-          : s.state === "running" ? "running" : s.state === "error" ? "failed" : "done";
+        let label = "idle";
+        if (s) {
+          if (s.state === "running") label = "running";
+          else if (s.state === "error") label = "failed";
+          else if (s.hits) label = "done";
+        }
         const w = label.length * 6.6 + 26;
         refs.pill.querySelector("rect").setAttribute("width", w);
         refs.pill.querySelector("rect").setAttribute("x", -w / 2);
@@ -913,7 +966,7 @@
         const txt = refs.pill.querySelector("text");
         txt.textContent = label.toUpperCase();
         txt.setAttribute("x", -w / 2 + 20);
-        refs.pill.setAttribute("opacity", s && s.hits ? 1 : 0.5);
+        refs.pill.setAttribute("opacity", lit ? 1 : 0.5);
       }
     });
     if (S.coreSub) {
@@ -1042,31 +1095,33 @@
     el("mid-title").textContent = loopy ? "Passes" : "Throughput";
     el("mid-note").textContent = loopy
       ? (S.signalName ? `bar = ${S.signalName}` : "bar = pass duration")
-      : "completions · last 60s";
+      : "activity · last 60s";
     if (loopy) paintTape(); else paintBars();
   }
 
   function paintBars() {
     const box = el("bars");
     box.innerHTML = "";
-    const byT = new Map(S.buckets.map((b) => [b.t, b]));
-    const lastT = S.endedAt
-      ? Math.floor(S.endedAt / 1000)
-      : (S.buckets.length ? S.buckets[S.buckets.length - 1].t : Math.floor(Date.now() / 1000));
-    const start = lastT - (BUCKETS - 1);
-    const window = [];
-    for (let t = start; t <= lastT; t++) window.push(byT.get(t) || { t, by: {} });
+    const window = bucketWindow();
     const max = Math.max(1, ...window.map((b) => Math.max(0, ...Object.values(b.by), 0)));
     window.forEach((b) => {
       const d = document.createElement("div");
       d.className = "bucket";
-      Object.entries(b.by).forEach(([node, n]) => {
+      const entries = Object.entries(b.by);
+      if (!entries.length) {
         const i = document.createElement("i");
-        i.style.background = safeColor(S.colors[node]);
-        i.style.height = Math.round((n / max) * 100) + "%";
-        i.title = `${node} · ${n}`;
+        i.style.background = "#eef0f6";
+        i.style.height = "2px";
         d.append(i);
-      });
+      } else {
+        entries.forEach(([node, n]) => {
+          const i = document.createElement("i");
+          i.style.background = safeColor(S.colors[node]);
+          i.style.height = Math.max(4, Math.round((n / max) * 100)) + "%";
+          i.title = `${node} · ${n}`;
+          d.append(i);
+        });
+      }
       box.append(d);
     });
     const legend = el("legend");
@@ -1186,12 +1241,12 @@
   }
 
   function paintMini() {
-    const max = Math.max(1, ...S.buckets.map((b) => Object.values(b.by).reduce((a, n) => a + n, 0)));
-    el("mini").innerHTML = S.buckets
-      .slice(-26)
+    const window = bucketWindow().slice(-26);
+    const max = Math.max(1, ...window.map((b) => Object.values(b.by).reduce((a, n) => a + n, 0)));
+    el("mini").innerHTML = window
       .map((b) => {
         const n = Object.values(b.by).reduce((a, v) => a + v, 0);
-        return `<i style="height:${Math.round((n / max) * 100)}%"></i>`;
+        return `<i style="height:${Math.max(2, Math.round((n / max) * 100))}%"></i>`;
       })
       .join("");
   }
@@ -1267,6 +1322,7 @@
   setInterval(() => {
     if (!S.startedAt) return;
     el("r-elapsed").textContent = fmt((S.endedAt || Date.now()) - S.startedAt);
+    if (!S.endedAt) { paintMiddle(); paintMini(); }
     if (!connected) { setLive(""); return; }
     setLive(S.endedAt ? "on" : "run");
   }, 200);
