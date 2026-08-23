@@ -175,14 +175,17 @@ control moves, a dot rides the link it moved along.
 **Stage stepper** — the graph's layers as numbered stages, with the one
 currently executing lit.
 
-**Pipeline / Queue** — where the run is spending its time, passes remaining,
-revisits inside the current pass, errors.
+**Pipeline / Queue / Node status** — left rail. Time share per node, then a
+compact pass counter (left, running, done, revisits, errors — it does not
+grow), then each node's hit count. LangGraph runs do not enqueue a long
+work list here.
 
 **Passes** — one column per pass, one row per node. Skipped nodes leave gaps,
 revisits show a count, and the bar under each column is your convergence
 signal, coloured red at the worst value seen and green at zero. Twenty passes
 read as a fabric: convergence is a staircase, thrashing is noise. Single-pass
-runs get a throughput chart here instead.
+runs get a throughput chart here instead. Throughput and System sit as an
+equal pair under the mesh.
 
 **Live feed** — timestamped node, tool and model lines, colour-coded per node.
 

@@ -92,7 +92,10 @@
   .card > h2 .lbl.right { margin-left: auto; }
   .card .body { padding: 0 15px 14px; min-height: 0; overflow: auto; }
 
-  .rail { display: grid; grid-template-rows: auto 1fr; gap: 16px; min-height: 0; }
+  /* Pipeline + Queue size to content; Node status fills leftover and scrolls. */
+  .rail { display: grid; grid-template-rows: auto auto minmax(0, 1fr); gap: 16px; min-height: 0; }
+  .rail .pipe-card .body { max-height: 28vh; }
+  .rail .queue-card .body { overflow: visible; }
 
   /* pipeline bars */
   .bar-row { margin-bottom: 11px; }
@@ -154,15 +157,15 @@
   .entry.warn .msg { color: var(--warn); }
 
   /* ---------- bottom cards ---------- */
-  .cards { display: grid; grid-template-columns: 1.15fr 1.35fr 1fr; gap: 16px; padding: 16px 22px 0; }
+  .cards { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 16px 22px 0; }
 
-  .agent-row { display: grid; grid-template-columns: 1fr 90px 34px 82px 40px; gap: 10px; align-items: center; margin-bottom: 7px; }
+  /* Narrow rail: name · share segs · hits. Activity lives on the mesh pills. */
+  .agent-row { display: grid; grid-template-columns: minmax(0, 1fr) 56px 28px; gap: 8px; align-items: center; margin-bottom: 7px; }
   .agent-row .nm { display: flex; align-items: center; gap: 7px; font-weight: 700; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .agent-row .nm i { width: 6px; height: 6px; border-radius: 50%; flex: none; }
-  .segs { display: flex; gap: 2px; height: 9px; }
+  .segs { display: flex; gap: 2px; height: 7px; }
   .segs i { flex: 1; border-radius: 1px; }
-  .agent-row .pct { text-align: right; font-weight: 700; font-variant-numeric: tabular-nums; font-size: 11px; }
-  .agent-row .act { color: var(--faint); font-size: 10px; letter-spacing: .06em; text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .agent-row .pct, .agent-row .act { display: none; }
   .agent-row .cnt { text-align: right; font-weight: 700; font-variant-numeric: tabular-nums; font-size: 11px; }
 
   [hidden] { display: none !important; }
@@ -265,11 +268,11 @@
 
   <main>
     <section class="rail">
-      <div class="card">
+      <div class="card pipe-card">
         <h2>Pipeline <span class="lbl right" id="pipe-note">time share</span></h2>
         <div class="body" id="pipeline"><div class="empty">No nodes yet.</div></div>
       </div>
-      <div class="card">
+      <div class="card queue-card">
         <h2>Queue</h2>
         <div class="body">
           <div class="rows">
@@ -280,6 +283,10 @@
             <div class="row"><span>errors</span><b id="q-err" class="good">0</b></div>
           </div>
         </div>
+      </div>
+      <div class="card nodes-card">
+        <h2>Node status <span class="lbl right" id="node-note"></span></h2>
+        <div class="body" id="agents"><div class="empty">No nodes yet.</div></div>
       </div>
     </section>
 
@@ -296,12 +303,7 @@
 
   <div class="cards">
     <section class="card">
-      <h2>Node status <span class="lbl right" id="node-note"></span></h2>
-      <div class="body" id="agents"></div>
-    </section>
-
-    <section class="card">
-      <h2><span id="mid-title">Throughput</span> <span class="lbl right" id="mid-note">activity · last 60s</span></h2
+      <h2><span id="mid-title">Throughput</span> <span class="lbl right" id="mid-note">activity · last 60s</span></h2>
       <div class="body" id="mid-body">
         <div id="bars"></div>
         <div class="legend" id="legend"></div>
