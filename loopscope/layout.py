@@ -228,6 +228,10 @@ def compute_mesh(
         orbit.sort(key=lambda n: (depth.get(n, 0), real.index(n) if n in real else 99))
 
     radius = max(232.0, 54.0 * len(orbit) / (2 * math.pi) + 190.0)
+    if len(orbit) > 1:
+        # Expanded graphs need room for both the circles and their captions.
+        # Zoom/focus in the dashboard provides readable detail at large sizes.
+        radius = max(radius, 210.0 / (2 * math.sin(math.pi / len(orbit))))
     positions: Dict[str, Dict[str, float]] = {}
     if hub:
         positions[hub] = {"x": 0.0, "y": 0.0, "r": 92.0, "hub": True, "angle": 0.0}

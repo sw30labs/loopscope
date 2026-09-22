@@ -28,6 +28,8 @@ DASHBOARD = Path(__file__).parents[1] / "loopscope" / "static" / "dashboard.html
         "replay",
         "handoff",
         "isolation",
+        "nested",
+        "navigation",
     ],
 )
 def test_dashboard_activity(scenario):

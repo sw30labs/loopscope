@@ -355,7 +355,60 @@ const scenarios = {
     assert.equal(element("activity-nodes").childElementCount, 1);
     assert.doesNotMatch(element("activity-nodes").textContent, /beta/i);
   },
+  nested() {
+    start();
+    event("iter.start", { iteration: 1 });
+    event("node.start", { node: "alpha", iteration: 1 });
+    event("node.end", { node: "alpha", iteration: 1, ms: 12 });
+    event("node.start", { node: "beta", iteration: 1 });
+    const expanded = structuredCloneForTest(topology);
+    expanded.nodes = expanded.nodes.filter((node) => node.id !== "beta");
+    expanded.nodes.push({ id: "beta/work", label: "Work", kind: "node", color: "#fa9500" });
+    expanded.edges = [{ source: "alpha", target: "beta/work" }, { source: "beta/work", target: "gamma" }];
+    expanded.mesh.positions["beta/work"] = expanded.mesh.positions.beta;
+    delete expanded.mesh.positions.beta;
+    app.handle(expanded);
+    event("node.start", { node: "beta/work", iteration: 1 });
+    event("metric", { name: "tokens", node: "beta/work", input: 10, output: 20, total: 30 });
+    paint();
+    assert.deepEqual(active(), ["beta/work"]);
+    assert.equal(app.S.status.beta, undefined, "Replaced wrapper must not remain active or count twice");
+    assert.equal(app.S.status.alpha.hits, 1, "Expanding topology must preserve prior work");
+    assert.equal(app.S.tokens, 30);
+    assert.equal(app.S.runId, "test");
+    event("node.end", { node: "beta/work", iteration: 1, ms: 40 });
+    event("run.end", { status: "partial" });
+    paint();
+    assert.deepEqual(active(), []);
+  },
+  navigation() {
+    start();
+    paint();
+    const mesh = element("mesh"), fit = mesh.getAttribute("viewBox");
+    const scale = () => {
+      const view = mesh.getAttribute("viewBox").split(/\s+/).map(Number);
+      return Math.min(1000 / view[2], 700 / view[3]);
+    };
+    const originalScale = scale();
+    element("graph-zoom-in").dispatchEvent({ type: "click" });
+    assert.ok(scale() > originalScale, "Zoom in makes nodes larger");
+    element("graph-fit").dispatchEvent({ type: "click" });
+    assert.equal(mesh.getAttribute("viewBox"), fit);
+    event("node.start", { node: "gamma" });
+    element("graph-focus").dispatchEvent({ type: "click" });
+    const focused = mesh.getAttribute("viewBox").split(/\s+/).map(Number);
+    assert.equal(focused[0] + focused[2] / 2, app.S.positions.gamma.x * app.S.stretch);
+    assert.ok(scale() >= 0.89, "Focused nodes are readable independent of graph size");
+    let prevented = false;
+    mesh.dispatchEvent({ type: "keydown", key: "ArrowDown", preventDefault() { prevented = true; } });
+    assert.ok(prevented);
+    assert.ok(Number(mesh.getAttribute("viewBox").split(/\s+/)[1]) > focused[1]);
+    event("run.end", { status: "ok" });
+    event("run.start", { run_id: "next" });
+    assert.equal(app.S.camera, null, "A new run resets the previous graph camera");
+  },
 };
+function structuredCloneForTest(value) { return JSON.parse(JSON.stringify(value)); }
 const scenario = process.argv[3];
 assert.ok(scenarios[scenario], `Unknown scenario: ${scenario}`);
 scenarios[scenario]();

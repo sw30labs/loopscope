@@ -259,15 +259,13 @@ class RalphLoop:
         The graph's nodes replace the phase list in the graph pane, and each
         node execution is filed under the current Ralph iteration.
         """
-        from .langgraph import LoopScopeCallback, publish_topology
+        from .langgraph import LoopScopeCallback
 
         handler = LoopScopeCallback(
             run_id=self.run_id, bus=self.bus, auto_iteration=False, capture_state=True
         )
-        publish_topology(
+        handler.topology(
             graph,
-            self.run_id,
-            bus=self.bus,
             title=self.objective,
             roles=self.roles,
             extra={"max_iters": self.max_iters},
