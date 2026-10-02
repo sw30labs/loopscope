@@ -148,6 +148,49 @@ const topology = {
 };
 const start = () => { app.handle(topology); event("run.start", { ts: 100 }); };
 
+// A persisted topology from before display compaction, including boundaries of
+// nested subgraphs. A real graph node called "review" must remain visible.
+const markerTopology = () => {
+  const nodes = [
+    ["__start__", "start"], ["alpha", "node"],
+    ["writer/__start__", "start"], ["writer/review/__start__", "start"],
+    ["review", "node"], ["writer/review/__end__", "end"],
+    ["writer/__end__", "end"], ["beta", "node"],
+    ["retry/__start__", "start"], ["retry/__end__", "end"], ["__end__", "end"],
+  ].map(([id, kind]) => ({ id, kind, label: id, color: "#00c6af" }));
+  const edges = [
+    { source: "__start__", target: "alpha" },
+    { source: "alpha", target: "writer/__start__" },
+    { source: "writer/__start__", target: "writer/review/__start__", conditional: true, label: "review needed" },
+    { source: "writer/review/__start__", target: "review" },
+    { source: "writer/review/__start__", target: "beta", conditional: true, label: "skip" },
+    { source: "review", target: "writer/review/__end__" },
+    { source: "writer/review/__end__", target: "writer/__end__" },
+    { source: "writer/__end__", target: "beta", conditional: true, label: "approved" },
+    { source: "beta", target: "retry/__start__" },
+    { source: "retry/__start__", target: "retry/__end__" },
+    { source: "retry/__end__", target: "beta", conditional: true, label: "retry", back: true },
+    { source: "beta", target: "__end__" },
+  ];
+  const meshPositions = {}, flowPositions = {};
+  nodes.forEach((node, index) => {
+    const angle = -Math.PI / 2 + 2 * Math.PI * index / nodes.length;
+    const r = node.kind === "node" ? 58 : 34;
+    meshPositions[node.id] = { x: Math.cos(angle) * 600, y: Math.sin(angle) * 600, r, angle };
+    flowPositions[node.id] = { x: 0, y: index * 200, r, layer: index, index: 0 };
+  });
+  return {
+    type: "graph.topology", run_id: "test", source: "langgraph", title: "Nested markers",
+    mode: "constellation", nodes, edges,
+    stages: nodes.filter((node) => node.kind === "node")
+      .map((node, index) => ({ index: index + 1, label: node.label, nodes: [node.id] })),
+    mesh: { hub: null, radius: 600, positions: meshPositions },
+    layout: { positions: flowPositions, back_edges: [["retry/__end__", "beta"]] },
+  };
+};
+const renderedNodes = () => Object.keys(app.S.nodeEls).sort();
+const displayedEdge = (source, target) => app.S.edges.find((edge) => edge.source === source && edge.target === target);
+
 const scenarios = {
   waiting() {
     paint();
@@ -355,7 +398,214 @@ const scenarios = {
     assert.equal(element("activity-nodes").childElementCount, 1);
     assert.doesNotMatch(element("activity-nodes").textContent, /beta/i);
   },
+  nested() {
+    start();
+    event("iter.start", { iteration: 1 });
+    event("node.start", { node: "alpha", iteration: 1 });
+    event("node.end", { node: "alpha", iteration: 1, ms: 12 });
+    event("node.start", { node: "beta", iteration: 1 });
+    const expanded = structuredCloneForTest(topology);
+    expanded.nodes = expanded.nodes.filter((node) => node.id !== "beta");
+    expanded.nodes.push({ id: "beta/work", label: "Work", kind: "node", color: "#fa9500" });
+    expanded.edges = [{ source: "alpha", target: "beta/work" }, { source: "beta/work", target: "gamma" }];
+    expanded.mesh.positions["beta/work"] = expanded.mesh.positions.beta;
+    delete expanded.mesh.positions.beta;
+    app.handle(expanded);
+    event("node.start", { node: "beta/work", iteration: 1 });
+    event("metric", { name: "tokens", node: "beta/work", input: 10, output: 20, total: 30 });
+    paint();
+    assert.deepEqual(active(), ["beta/work"]);
+    assert.equal(app.S.status.beta, undefined, "Replaced wrapper must not remain active or count twice");
+    assert.equal(app.S.status.alpha.hits, 1, "Expanding topology must preserve prior work");
+    assert.equal(app.S.tokens, 30);
+    assert.equal(app.S.runId, "test");
+    event("node.end", { node: "beta/work", iteration: 1, ms: 40 });
+    event("run.end", { status: "partial" });
+    paint();
+    assert.deepEqual(active(), []);
+  },
+  compact_nodes() {
+    const graph = markerTopology();
+    const original = JSON.stringify(graph);
+    app.handle(graph);
+    paint();
+    assert.deepEqual(renderedNodes(), ["alpha", "beta", "review"]);
+    assert.equal(element("mesh").querySelectorAll(".node").length, 3,
+      "Only executable graph nodes should produce circles");
+    assert.ok(app.S.nodeEls.review.pill, "A real node named review is not a boundary marker");
+    assert.deepEqual(Object.keys(app.S.positions).sort(), ["alpha", "beta", "review"]);
+    const nodeIds = new Set(renderedNodes());
+    assert.ok(app.S.edges.every((edge) => nodeIds.has(edge.source) && nodeIds.has(edge.target)));
+    assert.equal(app.S.edges.length, 4, "Chains should collapse to work-to-work edges without duplicates");
+    for (const [source, target, label] of [
+      ["alpha", "review", "review needed"], ["alpha", "beta", "skip"],
+      ["review", "beta", "approved"], ["beta", "beta", "retry"],
+    ]) {
+      const edge = displayedEdge(source, target);
+      assert.ok(edge, `Missing compact edge ${source}→${target}`);
+      assert.equal(edge.conditional, true);
+      assert.ok(edge.label.includes(label), `Missing branch label ${label}`);
+      assert.ok(app.S.linkIndex[`${source}→${target}`], "Compacted edges must actually render");
+    }
+    assert.ok(app.S.radius < graph.mesh.radius, "Boundary markers must no longer inflate the orbit radius");
+    assert.equal(JSON.stringify(graph), original, "Compacting the display must preserve the raw event for replay");
+
+    const flowGraph = structuredCloneForTest(graph);
+    flowGraph.mode = "flowchart";
+    app.handle(flowGraph);
+    paint();
+    assert.deepEqual(renderedNodes(), ["alpha", "beta", "review"]);
+    const rawGap = flowGraph.layout.positions.review.y - flowGraph.layout.positions.alpha.y;
+    const compactGap = app.S.positions.review.y - app.S.positions.alpha.y;
+    assert.ok(compactGap > 0 && compactGap < rawGap,
+      "Removing marker rows must close the corresponding gaps in the flowchart");
+    assert.ok(app.S.positions.beta.y > app.S.positions.review.y);
+  },
+  marker_handoff() {
+    app.handle(markerTopology());
+    event("run.start", { ts: 100 });
+    event("edge.traverse", { source: "writer/review/__start__", target: "review" });
+    assert.equal(app.S.lastHandoff, null, "An unobserved predecessor must not become a reported handoff");
+    event("edge.traverse", { source: "alpha", target: "writer/__start__" });
+    paint();
+    assert.equal(app.S.lastHandoff, null, "Entering a marker does not predict which branch will execute");
+    event("edge.traverse", { source: "writer/__start__", target: "writer/review/__start__" });
+    assert.equal(app.S.lastHandoff, null);
+    event("edge.traverse", { source: "writer/review/__start__", target: "review" });
+    event("node.start", { node: "review" });
+    paint();
+    assert.equal(app.S.lastHandoff.key, "alpha→review");
+    assert.match(element("activity-handoff").textContent, /alpha.*review/i);
+    assert.ok(app.S.linkIndex["alpha→review"].classList.contains("recent"));
+    assert.equal(app.S.linkIndex["alpha→beta"].classList.contains("recent"), false);
+    assert.ok(app.S.nodeEls.review.g.classList.contains("running"));
+
+    event("node.end", { node: "review", ms: 50 });
+    event("edge.traverse", { source: "review", target: "writer/review/__end__" });
+    event("edge.traverse", { source: "writer/review/__end__", target: "writer/__end__" });
+    assert.equal(app.S.lastHandoff.key, "alpha→review", "Partial marker chains retain the last observed visible hop");
+    event("edge.traverse", { source: "writer/__end__", target: "beta" });
+    paint();
+    assert.equal(app.S.lastHandoff.key, "review→beta");
+    assert.ok(app.S.linkIndex["review→beta"].classList.contains("recent"));
+    event("edge.traverse", { source: "beta", target: "__end__" });
+    assert.equal(app.S.lastHandoff.key, "review→beta", "A run boundary is never an activity destination");
+
+    event("edge.traverse", { source: "alpha", target: "writer/__start__" });
+    event("edge.traverse", { source: "writer/__start__", target: "writer/review/__start__" });
+    event("edge.traverse", { source: "writer/review/__start__", target: "beta" });
+    assert.equal(app.S.lastHandoff.key, "alpha→beta", "Only the branch actually observed is highlighted");
+    event("edge.traverse", { source: "beta", target: "review" });
+    paint();
+    assert.equal(app.S.lastHandoff.key, "beta→review", "Direct dynamic work-node hops remain supported");
+    assert.ok(app.S.linkIndex["beta→review"].classList.contains("recent"));
+    assert.deepEqual(renderedNodes(), ["alpha", "beta", "review"]);
+  },
+  marker_replay() {
+    const events = [
+      { ...markerTopology(), seq: 1 },
+      { type: "run.start", run_id: "test", ts: 100, seq: 2 },
+      { type: "edge.traverse", run_id: "test", source: "alpha", target: "writer/__start__", ts: 101, seq: 3 },
+      { type: "edge.traverse", run_id: "test", source: "writer/__start__", target: "writer/review/__start__", ts: 102, seq: 4 },
+    ];
+    socket.onmessage({ data: JSON.stringify({ type: "replay", events }) });
+    paint();
+    assert.deepEqual(renderedNodes(), ["alpha", "beta", "review"]);
+    assert.equal(app.S.lastHandoff, null);
+    event("edge.traverse", { source: "writer/review/__start__", target: "review", seq: 5 });
+    paint();
+    assert.equal(app.S.lastHandoff.key, "alpha→review", "A live hop can finish a marker chain restored from old replay data");
+    event("run.end", { status: "ok", seq: 6 });
+    const next = markerTopology();
+    next.run_id = "next";
+    app.handle(next);
+    event("run.start", { run_id: "next", seq: 7 });
+    event("edge.traverse", { run_id: "next", source: "writer/review/__start__", target: "review", seq: 8 });
+    paint();
+    assert.equal(app.S.lastHandoff, null, "Marker ancestry must not leak into the next run");
+  },
+  marker_state_reset() {
+    app.handle(markerTopology());
+    event("run.start", { ts: 100 });
+    event("iter.start", { iteration: 1 });
+    for (const node of ["__start__", "writer/review/__start__", "writer/__end__", "__end__"]) {
+      event("node.start", { node });
+      event("state.delta", { node, keys: ["result"] });
+      event("log", { node, text: "Marker event from an older producer" });
+      event("node.end", { node, ms: 1 });
+    }
+    paint();
+    assert.deepEqual([...app.S.order].sort(), ["alpha", "beta", "review"],
+      "Historical marker activity must not recreate removed agent rows");
+    assert.deepEqual(renderedNodes(), ["alpha", "beta", "review"]);
+    assert.deepEqual(active(), []);
+
+    event("edge.traverse", { source: "alpha", target: "writer/__start__" });
+    event("edge.traverse", { source: "writer/__start__", target: "writer/review/__start__" });
+    event("iter.end", { iteration: 1, status: "ok" });
+    event("iter.start", { iteration: 2 });
+    event("edge.traverse", { source: "writer/review/__start__", target: "review" });
+    assert.equal(app.S.lastHandoff, null, "Marker ancestry must not leak into the next iteration");
+    event("edge.traverse", { source: "alpha", target: "writer/__start__" });
+    app.hardReset();
+    app.handle(markerTopology());
+    event("run.start", { ts: 110 });
+    event("edge.traverse", { source: "writer/__start__", target: "writer/review/__start__" });
+    event("edge.traverse", { source: "writer/review/__start__", target: "review" });
+    paint();
+    assert.equal(app.S.lastHandoff, null, "A replay reset must also clear pending marker ancestry");
+  },
+  compact_update() {
+    start();
+    event("node.start", { node: "alpha" });
+    event("node.end", { node: "alpha", ms: 20 });
+    event("node.start", { node: "gamma" });
+    app.handle(markerTopology());
+    paint();
+    assert.deepEqual(renderedNodes(), ["alpha", "beta", "review"]);
+    assert.equal(app.S.status.alpha.hits, 1, "A display refresh must preserve completed graph work");
+    assert.equal(app.S.status.gamma, undefined, "A replaced wrapper must no longer be active");
+    assert.deepEqual(active(), []);
+    event("node.start", { node: "review" });
+    event("edge.traverse", { source: "alpha", target: "writer/__start__" });
+    // Nested topology can be republished while a marker chain is in flight.
+    app.handle(markerTopology());
+    event("edge.traverse", { source: "writer/__start__", target: "writer/review/__start__" });
+    event("edge.traverse", { source: "writer/review/__start__", target: "review" });
+    paint();
+    assert.deepEqual(active(), ["review"]);
+    assert.equal(app.S.lastHandoff.key, "alpha→review");
+    assert.equal(element("activity-nodes").childElementCount, 1);
+    assert.equal(app.S.status.alpha.hits, 1);
+  },
+  navigation() {
+    start();
+    paint();
+    const mesh = element("mesh"), fit = mesh.getAttribute("viewBox");
+    const scale = () => {
+      const view = mesh.getAttribute("viewBox").split(/\s+/).map(Number);
+      return Math.min(1000 / view[2], 700 / view[3]);
+    };
+    const originalScale = scale();
+    element("graph-zoom-in").dispatchEvent({ type: "click" });
+    assert.ok(scale() > originalScale, "Zoom in makes nodes larger");
+    element("graph-fit").dispatchEvent({ type: "click" });
+    assert.equal(mesh.getAttribute("viewBox"), fit);
+    event("node.start", { node: "gamma" });
+    element("graph-focus").dispatchEvent({ type: "click" });
+    const focused = mesh.getAttribute("viewBox").split(/\s+/).map(Number);
+    assert.equal(focused[0] + focused[2] / 2, app.S.positions.gamma.x * app.S.stretch);
+    assert.ok(scale() >= 0.89, "Focused nodes are readable independent of graph size");
+    let prevented = false;
+    mesh.dispatchEvent({ type: "keydown", key: "ArrowDown", preventDefault() { prevented = true; } });
+    assert.ok(prevented);
+    assert.ok(Number(mesh.getAttribute("viewBox").split(/\s+/)[1]) > focused[1]);
+    event("run.end", { status: "ok" });
+    event("run.start", { run_id: "next" });
+    assert.equal(app.S.camera, null, "A new run resets the previous graph camera");
+  },
 };
+function structuredCloneForTest(value) { return JSON.parse(JSON.stringify(value)); }
 const scenario = process.argv[3];
 assert.ok(scenarios[scenario], `Unknown scenario: ${scenario}`);
 scenarios[scenario]();

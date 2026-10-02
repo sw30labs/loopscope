@@ -83,6 +83,40 @@ scope.hold()                            # keep the dashboard up after the script
 config you pass in. Each top-level invocation counts as one pass, so a plain
 `while` loop around `app.invoke()` already fills the tape.
 
+### Nested graphs
+
+Compiled subgraphs added as nodes expand automatically. Their work has stable
+names such as `render_track/writer_qa/write`; the containing node and LangGraph's
+entry/exit routers do not inflate execution counts. The root owns the run and
+pass lifecycle. Invoke children with inherited callbacks, without another
+`attach()` or `finish()`.
+
+If a node function calls a graph through an adapter or error boundary, declare
+the graph it invokes before attaching:
+
+```python
+app.loopscope_subgraphs = {"render_track": take_app}
+config = loopscope.attach(app, capture_state=False)
+```
+
+For sensitive workflows, `capture_errors=False` also omits exception bodies
+from chain/tool error events while retaining the exception type and failing
+node. This does not alter the exception returned to the caller or redact custom
+log text supplied by your application.
+
+This publishes the child's real topology. Execution still comes from its normal
+LangGraph callbacks. Adapters that construct graphs dynamically can call
+`handler.include_subgraph(child, metadata)` on the root LoopScopeCallback before
+invoking the child, using the current LangGraph runnable metadata. The dashboard
+updates the topology within the same run and retains completed child history.
+
+Custom clients can dispatch LangChain custom events named `loopscope`: a log is
+`{"kind": "log", "text": "cache hit", "level": "info"}`; reported token usage is
+`{"kind": "tokens", "input": 12, "output": 8, "total": 20}`. Supply current graph
+metadata when invoking the callback directly so events use the correct nested
+node. Counts must be nonnegative integers; omit unavailable fields. These events
+complement the existing model/tool callbacks rather than estimating usage.
+
 ## Ralph loops
 
 ```python
@@ -172,6 +206,11 @@ pass counter in the middle instead. Each node carries a ring showing its share
 of the run's time, a status pill, and a subtitle taken from its docstring. When
 control moves, a dot rides the link it moved along.
 
+Use **+ / −**, **Fit**, or **Current stage** to navigate large graphs. Click a
+node's name in Node status to focus it, or drag the graph to pan. With the graph
+focused, arrow keys pan, `+`/`−` zoom and `0` fits. Compact sidebar labels put the
+leaf name first; hovering shows its full namespace.
+
 **Stage stepper** — the graph's layers as numbered stages, with the one
 currently executing lit.
 
@@ -218,9 +257,9 @@ Default bind is `127.0.0.1:7788`. Change it with `loopscope.start(port=...)`.
 
 - Node subtitles come from the first line of each node function's docstring,
   or from `roles={"node": "text"}` if you would rather say it explicitly.
-- Node identity comes from `metadata["langgraph_node"]`, filtered to runs tagged
-  `graph:step:N`. Without that filter, routers and chains inside a node
-  double-count as node executions.
+- Node identity combines `metadata["langgraph_node"]` with the checkpoint
+  namespace (excluding task UUIDs), filtered to runs tagged `graph:step:N`.
+  Entry/exit routers and expanded containers are excluded from work counts.
 - Edge traversal is inferred from execution order, which is exact for
   sequential graphs and approximate under parallel fan-out.
 - State deltas are truncated for the wire (600 chars, 40 keys, 12 list items).

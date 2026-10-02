@@ -90,3 +90,12 @@ def test_flowchart_layout_gives_radii():
     )
     assert laid["positions"]["__start__"]["r"] == 34.0
     assert laid["positions"]["a"]["r"] == 58.0
+
+
+def test_large_constellation_leaves_space_for_circles_and_captions():
+    from math import hypot
+    nodes = [f"stage_{i}" for i in range(24)]
+    positions = compute_mesh(nodes, [])['positions']
+    for left, right in zip(nodes, nodes[1:] + nodes[:1]):
+        a, b = positions[left], positions[right]
+        assert hypot(a['x'] - b['x'], a['y'] - b['y']) >= 209.9

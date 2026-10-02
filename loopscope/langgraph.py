@@ -75,7 +75,8 @@ END_NODE = "__end__"
 # --- topology ----------------------------------------------------------------
 
 
-def extract_topology(graph: Any) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+def extract_topology(graph: Any, *, subgraphs: Optional[Dict[str, Any]] = None,
+                     _prefix: str = "", _ancestors: Tuple[int, ...] = ()) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Pull nodes and edges out of a compiled (or raw) LangGraph object.
 
     Compiled `get_graph()` is not enough on its own. A conditional edge without
@@ -89,7 +90,55 @@ def extract_topology(graph: Any) -> Tuple[List[Dict[str, Any]], List[Dict[str, A
     if builder is None and _is_builder(graph):
         builder = graph
     builder_nodes, builder_edges = _from_builder(builder) if builder is not None else ([], [])
-    return _merge_topology(builder_nodes, builder_edges, drawable_nodes, drawable_edges)
+    nodes, edges = _merge_topology(builder_nodes, builder_edges, drawable_nodes, drawable_edges)
+    # Keep entry/exit markers for a nested invocation, but count/time only its
+    # actual work nodes. Explicit declarations cover functions that invoke a
+    # graph inside a try/except boundary (e.g. per-track album recovery).
+    if id(graph) in _ancestors:
+        return nodes, edges
+    declared = dict(getattr(graph, "loopscope_subgraphs", {}) or {})
+    for name, spec in (getattr(builder, "nodes", {}) or {}).items():
+        runnable = getattr(spec, "runnable", spec)
+        if getattr(runnable, "builder", None) is not None:
+            declared.setdefault(str(name), runnable)
+    for node in list(nodes):
+        name = node["id"]
+        path = _prefix + name
+        child = (subgraphs or {}).get(path, declared.get(name))
+        if child is None or id(child) in (*_ancestors, id(graph)):
+            continue
+        inner_nodes, inner_edges = extract_topology(
+            child, subgraphs=subgraphs, _prefix=path + "/",
+            _ancestors=(*_ancestors, id(graph)),
+        )
+        if not inner_nodes:
+            continue
+        prefix = name + "/"
+        entry, end = prefix + START_NODE, prefix + END_NODE
+        nodes = [item for item in nodes if item["id"] != name]
+        for inner in inner_nodes:
+            label = inner.get("label", inner["id"])
+            if inner["id"] in (START_NODE, END_NODE):
+                label = name if inner["id"] == START_NODE else name + " done"
+            nodes.append({**inner, "id": prefix + inner["id"], "label": label})
+        edges = [{**edge, "source": end if edge["source"] == name else edge["source"],
+                  "target": entry if edge["target"] == name else edge["target"]}
+                 for edge in edges]
+        edges.extend({**edge, "source": prefix + edge["source"], "target": prefix + edge["target"]}
+                     for edge in inner_edges)
+    return nodes, edges
+
+
+def node_path(metadata: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Stable node identity across nested invocations; omit task UUIDs."""
+    metadata = metadata or {}
+    node = metadata.get("langgraph_node")
+    namespace = metadata.get("langgraph_checkpoint_ns") or ""
+    if namespace:
+        parts = [part.rsplit(":", 1)[0] for part in str(namespace).split("|") if part]
+        if parts and parts[-1] == node:
+            return "/".join(parts)
+    return str(node) if node is not None else None
 
 
 def _from_drawable(graph: Any) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
@@ -466,11 +515,13 @@ class LoopScopeCallback(BaseCallbackHandler):
         bus: Optional[EventBus] = None,
         auto_iteration: bool = True,
         capture_state: bool = True,
+        capture_errors: bool = True,
     ):
         self.bus = bus or default_bus()
         self.run_id = run_id or new_run_id("lg")
         self.auto_iteration = auto_iteration
         self.capture_state = capture_state
+        self.capture_errors = capture_errors
         self._open: Dict[str, Dict[str, Any]] = {}
         self._last_node: Optional[str] = None
         self._state: Dict[str, Any] = {}
@@ -480,10 +531,90 @@ class LoopScopeCallback(BaseCallbackHandler):
         self._depth = 0
         self._ended = False
         self._mu = threading.Lock()
+        self._topology_mu = threading.RLock()
+        self._graph = None
+        self._title = "LangGraph"
+        self._roles = None
+        self._topology_extra = None
+        self._subgraphs: Dict[str, Any] = {}
+        self._containers: Set[str] = set()
+        self._terminal_ids: Set[str] = set()
+        self._edge_targets: Dict[str, List[str]] = {}
+
+    def topology(self, graph: Any, *, title=None, roles=None, extra=None) -> None:
+        self._graph = graph
+        self._title = title or getattr(graph, "name", None) or "LangGraph"
+        self._roles = roles
+        self._topology_extra = extra
+        self._publish_topology()
+
+    def _publish_topology(self) -> None:
+        nodes, edges = extract_topology(self._graph, subgraphs=self._subgraphs)
+        containers = {node["id"][:-len("/" + START_NODE)] for node in nodes
+                      if node["id"].endswith("/" + START_NODE)}
+        terminal_ids = {node["id"] for node in nodes if node.get("kind") in ("start", "end")}
+        edge_targets: Dict[str, List[str]] = {}
+        for edge in edges:
+            edge_targets.setdefault(edge["source"], []).append(edge["target"])
+        with self._mu:
+            self._containers = containers
+            self._terminal_ids = terminal_ids
+            self._edge_targets = edge_targets
+        self._emit(TOPOLOGY, **pack(nodes, edges, title=self._title, source="langgraph",
+                                   roles=self._roles, extra=self._topology_extra))
+
+    def _transition(self, source: str, target: str) -> None:
+        # Traverse subgraph entry/exit markers so the emitted links exist in
+        # the expanded topology. Never infer an unexecuted work node.
+        pending = [(source, [])]
+        visited = {source}
+        with self._mu:
+            edge_targets, terminal_ids = self._edge_targets, self._terminal_ids
+        while pending:
+            current, path = pending.pop(0)
+            for next_node in edge_targets.get(current, []):
+                next_path = path + [(current, next_node)]
+                if next_node == target:
+                    for src, dst in next_path:
+                        self._emit(EDGE, source=src, target=dst)
+                    return
+                if next_node in terminal_ids and next_node not in visited:
+                    visited.add(next_node)
+                    pending.append((next_node, next_path))
+        if source != target:
+            self._emit(EDGE, source=source, target=target)
+
+    def include_subgraph(self, graph: Any, metadata: Optional[Dict[str, Any]]) -> None:
+        """Discover a graph invoked from a node without opening another run."""
+        path = node_path(metadata)
+        with self._topology_mu:
+            if not path or path in self._containers or self._graph is None:
+                return
+            self._subgraphs[path] = graph
+            self._publish_topology()
+
+    def on_custom_event(self, name: str, data: Any, *, run_id=None, metadata=None, **kwargs: Any) -> None:
+        """Compact telemetry from custom model/tool clients, attributed to a node."""
+        if name != "loopscope" or not isinstance(data, dict):
+            return
+        node = self._current_node({"metadata": metadata})
+        if data.get("kind") == "tokens":
+            usage = {key: data[key] for key in ("input", "output", "total")
+                     if type(data.get(key)) is int and data[key] >= 0}
+            if usage:
+                if "total" not in usage:
+                    usage["total"] = usage.get("input", 0) + usage.get("output", 0)
+                self._emit(METRIC, name="tokens", node=node, iteration=self._iteration, **usage)
+        else:
+            self._emit(LOG, node=node, level=data.get("level", "info"),
+                       text=str(data.get("text", ""))[:600])
 
     # -- helpers
     def _emit(self, type_: str, **payload: Any) -> None:
         self.bus.publish(Event(type_, self.run_id, payload))
+
+    def _error_text(self, error: BaseException) -> str:
+        return (f"{type(error).__name__}: {error}"[:400] if self.capture_errors else type(error).__name__)
 
     def _end_run(self, **payload: Any) -> None:
         if self._ended:
@@ -494,6 +625,8 @@ class LoopScopeCallback(BaseCallbackHandler):
     @staticmethod
     def _is_node(tags: Optional[Sequence[str]], metadata: Optional[Dict[str, Any]]) -> bool:
         if not metadata or not metadata.get("langgraph_node"):
+            return False
+        if metadata["langgraph_node"] in (START_NODE, END_NODE):
             return False
         return any(str(t).startswith("graph:step:") for t in (tags or []))
 
@@ -532,20 +665,23 @@ class LoopScopeCallback(BaseCallbackHandler):
         with self._mu:
             self._depth += 1
             if self._is_node(tags, metadata):
-                node = str(metadata["langgraph_node"])
+                node = node_path(metadata)
                 step = metadata.get("langgraph_step")
                 self._open[str(run_id)] = {"node": node, "t0": time.perf_counter(), "step": step}
-                last = self._last_node
-                self._last_node = node
+                if node not in self._containers:
+                    last = self._last_node
+                    self._last_node = node
+                else:
+                    node = None
             elif parent_run_id is None and not (metadata or {}).get("langgraph_node"):
                 self._root = str(run_id)
                 self._last_node = None
                 start_root = True
         if node:
-            if last and last != node:
-                self._emit(EDGE, source=last, target=node)
+            if last:
+                self._transition(last, node)
             elif not last:
-                self._emit(EDGE, source=START_NODE, target=node)
+                self._transition(START_NODE, node)
             self._emit(NODE_START, node=node, step=step, iteration=self._iteration)
         elif start_root and self.auto_iteration:
             self.begin_iteration(kwargs.get("name"))
@@ -568,6 +704,8 @@ class LoopScopeCallback(BaseCallbackHandler):
             last = self._last_node
         if record:
             node = record["node"]
+            if node in self._containers:
+                return
             elapsed_ms = (time.perf_counter() - record["t0"]) * 1000
             written: List[str] = []
             state_dict = _as_state_dict(outputs)
@@ -600,7 +738,7 @@ class LoopScopeCallback(BaseCallbackHandler):
         if is_root:
             if self.auto_iteration:
                 self.end_iteration(status="ok")
-            self._emit(EDGE, source=last or START_NODE, target=END_NODE)
+            self._transition(last or START_NODE, END_NODE)
 
     def on_chain_error(
         self,
@@ -617,17 +755,22 @@ class LoopScopeCallback(BaseCallbackHandler):
             if is_root:
                 self._root = None
         if record:
+            node = record["node"]
+            if node in self._containers:
+                self._emit(LOG, level="error", node=node + "/" + START_NODE,
+                           text=self._error_text(error))
+                return
             self._emit(
                 NODE_ERROR,
                 node=record["node"],
-                error=f"{type(error).__name__}: {error}"[:400],
+                error=self._error_text(error),
                 ms=round((time.perf_counter() - record["t0"]) * 1000, 2),
                 iteration=self._iteration,
             )
         if is_root:
             if self.auto_iteration:
                 self.end_iteration(status="error")
-            self._end_run(status="error", error=f"{type(error).__name__}: {error}"[:400])
+            self._end_run(status="error", error=self._error_text(error))
 
     # -- model + tool callbacks
     def on_llm_start(self, serialized, prompts, **kwargs: Any) -> None:
@@ -651,11 +794,12 @@ class LoopScopeCallback(BaseCallbackHandler):
         )
 
     def on_tool_error(self, error: BaseException, **kwargs: Any) -> None:
-        self._emit(LOG, level="error", node=self._current_node(kwargs), text=f"tool failed: {error}"[:300])
+        self._emit(LOG, level="error", node=self._current_node(kwargs), text=f"tool failed: {self._error_text(error)}"[:300])
 
     def _current_node(self, kwargs: Dict[str, Any]) -> Optional[str]:
         metadata = kwargs.get("metadata") or {}
-        return metadata.get("langgraph_node") or self._last_node
+        node = node_path(metadata) or self._last_node
+        return node + "/" + START_NODE if node in self._containers else node
 
 
 def _as_state_dict(outputs: Any) -> Optional[Dict[str, Any]]:
@@ -706,6 +850,7 @@ def attach(
     auto_iteration: bool = True,
     roles: Optional[Dict[str, str]] = None,
     capture_state: bool = True,
+    capture_errors: bool = True,
 ) -> Dict[str, Any]:
     """Publish the graph shape and return a config that streams its execution.
 
@@ -716,9 +861,10 @@ def attach(
     """
     bus = bus or default_bus()
     handler = LoopScopeCallback(
-        run_id=run_id, bus=bus, auto_iteration=auto_iteration, capture_state=capture_state
+        run_id=run_id, bus=bus, auto_iteration=auto_iteration, capture_state=capture_state,
+        capture_errors=capture_errors,
     )
-    publish_topology(graph, handler.run_id, bus=bus, title=title, roles=roles)
+    handler.topology(graph, title=title, roles=roles)
     bus.publish(Event(RUN_START, handler.run_id, {"title": title or "LangGraph", "source": "langgraph"}))
 
     merged = dict(config or {})
