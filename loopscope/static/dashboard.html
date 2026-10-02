@@ -419,6 +419,7 @@
     runId: null, title: null, source: null,
     startedAt: null, endedAt: null, stopReason: null,
     nodes: [], edges: [], order: [], stages: [], colors: {},
+    hiddenNodes: new Set(), markerSources: new Map(),
     hub: null, positions: {}, meshPos: {}, flowPos: {},
     mode: "constellation", autoMode: "constellation", modeLocked: false,
     radius: 240, stretch: 1, camera: null, fitView: null, lastWorkNode: null,
@@ -506,6 +507,7 @@
       runId: null, title: null, source: null,
       startedAt: null, endedAt: null, stopReason: null,
       nodes: [], edges: [], order: [], stages: [], colors: {},
+      hiddenNodes: new Set(), markerSources: new Map(),
       hub: null, positions: {}, meshPos: {}, flowPos: {},
       mode: "constellation", autoMode: "constellation", modeLocked: false,
       radius: 240, stretch: 1, camera: null, fitView: null, lastWorkNode: null,
@@ -529,6 +531,7 @@
       runId, title: title || runId, startedAt: null, endedAt: null, stopReason: null,
       status: {}, lastHandoff: null, iterations: new Map(), current: 0, tokens: 0,
       edgesSeen: new Set(), buckets: [], signalName: null,
+      markerSources: new Map(),
       camera: null, fitView: null, lastWorkNode: null,
     });
     el("feed").innerHTML = "";
@@ -541,9 +544,83 @@
     return !!(S.runId && e.run_id && e.run_id !== S.runId && S.startedAt && !S.endedAt);
   }
 
+  // Entry/exit markers remain in the event stream for nested graph tracking.
+  // The diagram shows work nodes, joining paths across those markers instead.
+  function compactTopology(e) {
+    const hidden = new Set((e.nodes || []).filter((n) => n.kind === "start" || n.kind === "end").map((n) => n.id));
+    S.hiddenNodes = hidden;
+    if (!hidden.size) { S.markerSources.clear(); return e; }
+    const nodes = e.nodes.filter((n) => !hidden.has(n.id));
+    const visible = new Set(nodes.map((n) => n.id));
+    // Discovery can publish a topology in the middle of an observed handoff.
+    S.markerSources.forEach((source, marker) => {
+      if (!hidden.has(marker) || !visible.has(source)) S.markerSources.delete(marker);
+    });
+    const outgoing = new Map(), joined = new Map();
+    (e.edges || []).forEach((edge) => {
+      if (!outgoing.has(edge.source)) outgoing.set(edge.source, []);
+      outgoing.get(edge.source).push(edge);
+    });
+    const combine = (a, b) => ({
+      ...a, target: b.target,
+      conditional: !!(a.conditional || b.conditional), back: !!(a.back || b.back),
+      label: [...new Set([a.label, b.label].filter(Boolean))].join(" · "),
+    });
+    nodes.forEach((node) => {
+      const walk = (edge, visited) => {
+        if (visible.has(edge.target)) {
+          const key = `${node.id}→${edge.target}`;
+          joined.set(key, joined.has(key) ? combine(joined.get(key), edge) : { ...edge });
+        } else if (hidden.has(edge.target) && !visited.has(edge.target)) {
+          const nextVisited = new Set(visited).add(edge.target);
+          (outgoing.get(edge.target) || []).forEach((next) => walk(combine(edge, next), nextVisited));
+        }
+      };
+      (outgoing.get(node.id) || []).forEach((edge) => walk(edge, new Set()));
+    });
+
+    // Repack the existing orbit in its original order, with no empty slots.
+    const mesh = { ...(e.mesh || {}), positions: {} };
+    const originalMesh = (e.mesh && e.mesh.positions) || {};
+    const orbit = nodes.filter((n) => n.id !== mesh.hub && originalMesh[n.id]);
+    const angle = (n) => {
+      const p = originalMesh[n.id];
+      return (Math.atan2(p.y, p.x) + Math.PI / 2 + 2 * Math.PI) % (2 * Math.PI);
+    };
+    orbit.sort((a, b) => angle(a) - angle(b));
+    mesh.radius = Math.max(232, 54 * orbit.length / (2 * Math.PI) + 190,
+      orbit.length > 1 ? 210 / (2 * Math.sin(Math.PI / orbit.length)) : 0);
+    if (visible.has(mesh.hub) && originalMesh[mesh.hub]) mesh.positions[mesh.hub] = { ...originalMesh[mesh.hub] };
+    orbit.forEach((node, i) => {
+      const theta = -Math.PI / 2 + i * 2 * Math.PI / orbit.length;
+      mesh.positions[node.id] = { ...originalMesh[node.id], angle: theta,
+        x: Math.cos(theta) * mesh.radius, y: Math.sin(theta) * mesh.radius };
+    });
+
+    // Remove terminal-only rows and unused columns from the flowchart too.
+    const layout = { ...(e.layout || {}), positions: {} }, rows = new Map();
+    nodes.forEach((node) => {
+      const p = e.layout && e.layout.positions && e.layout.positions[node.id];
+      if (!p) return;
+      if (!rows.has(p.y)) rows.set(p.y, []);
+      rows.get(p.y).push([node.id, p]);
+    });
+    [...rows.keys()].sort((a, b) => a - b).forEach((y, layer) => {
+      const members = rows.get(y).sort((a, b) => a[1].x - b[1].x);
+      members.forEach(([id, p], index) => {
+        layout.positions[id] = { ...p, x: (index - (members.length - 1) / 2) * 200,
+          y: layer * 200, layer, index };
+      });
+    });
+    const stages = (e.stages || []).map((stage) => ({ ...stage, nodes: stage.nodes.filter((id) => visible.has(id)) }))
+      .filter((stage) => stage.nodes.length).map((stage, i) => ({ ...stage, index: i + 1 }));
+    return { ...e, nodes, edges: [...joined.values()], mesh, layout, stages };
+  }
+
   function onTopology(e) {
     if (liveForeign(e)) return;
     if (e.run_id !== S.runId) reset(e.run_id, e.title);
+    e = compactTopology(e);
     S.nodes = e.nodes || [];
     S.edges = e.edges || [];
     S.stages = e.stages || [];
@@ -587,6 +664,7 @@
     S.startedAt = (typeof e.ts === "number" ? e.ts * 1000 : Date.now());
     S.endedAt = null;
     S.stopReason = null;
+    S.markerSources.clear();
     S.maxIters = e.max_iters || S.maxIters;
     feed(e, null, "run", `${e.title || e.run_id} started`);
   }
@@ -601,6 +679,7 @@
     S.endedAt = typeof e.ts === "number" ? e.ts * 1000 : Date.now();
     S.stopReason = e.status || "finished";
     S.lastHandoff = null;
+    S.markerSources.clear();
     Object.values(S.status).forEach((s) => {
       if (s.state === "running") s.state = "stopped";
       s.activeStarts = [];
@@ -612,6 +691,7 @@
 
   function onIterStart(e) {
     if (liveForeign(e)) return;
+    S.markerSources.clear();
     S.current = e.iteration;
     S.maxIters = e.max_iters || S.maxIters;
     if (!S.iterations.has(e.iteration)) S.iterations.set(e.iteration, { cells: {}, signal: null, status: "run" });
@@ -630,6 +710,7 @@
 
   function onNodeStart(e) {
     if (!currentRunEvent(e) || S.endedAt) return;
+    if (S.hiddenNodes.has(e.node)) return;
     S.lastWorkNode = e.node;
     const s = stat(e.node);
     if (!s.activeStarts.length) {
@@ -644,6 +725,7 @@
   }
 
   function onNodeEnd(e) {
+    if (S.hiddenNodes.has(e.node)) return;
     if (!currentRunEvent(e)) {
       feed(e, e.node, e.node, `${fmt(e.ms)}${(e.wrote && e.wrote.length) ? " → " + e.wrote.join(", ") : ""}`);
       return;
@@ -663,6 +745,7 @@
   }
 
   function onNodeError(e) {
+    if (S.hiddenNodes.has(e.node)) return;
     if (!currentRunEvent(e)) {
       feed(e, e.node, e.node, e.error || "failed", "bad");
       return;
@@ -686,6 +769,14 @@
   function onEdge(e) {
     if (!currentRunEvent(e) || S.endedAt) return;
     if (!e.source || !e.target) return;
+    const source = S.hiddenNodes.has(e.source) ? S.markerSources.get(e.source) : e.source;
+    // Resolve only observed hops; a hidden branch must not light up every exit.
+    if (S.hiddenNodes.has(e.target)) {
+      S.markerSources.set(e.target, source);
+      return;
+    }
+    if (!source) return;
+    e = { ...e, source };
     const key = `${e.source}→${e.target}`;
     let path = S.linkIndex && S.linkIndex[key];
     if (!path) path = declareHop(e.source, e.target);
@@ -710,13 +801,14 @@
 
   function onState(e) {
     if (liveForeign(e)) return;
+    if (S.hiddenNodes.has(e.node)) return;
     if (e.keys && e.keys.length && e.node) stat(e.node).activity = "wrote " + e.keys.join(", ");
   }
 
   function onLog(e) {
     const cls = e.level === "error" ? "bad" : (e.level === "warn" ? "warn" : "");
-    if (!liveForeign(e) && e.node && e.text) stat(e.node).activity = e.text;
-    const tick = liveForeign(e) ? runningId() : e.node;
+    if (!liveForeign(e) && e.node && e.text && !S.hiddenNodes.has(e.node)) stat(e.node).activity = e.text;
+    const tick = liveForeign(e) ? runningId() : (S.hiddenNodes.has(e.node) ? null : e.node);
     if (tick) bucketHit(tick, e.ts);
     feed(e, e.node, e.node || e.level || "log", e.text, cls);
   }
@@ -1038,6 +1130,10 @@
   }
 
   function linkPath(a, b, edge) {
+    if (edge && edge.source === edge.target) {
+      const r = a.r || 58;
+      return `M ${a.x - r * 0.6} ${a.y - r * 0.8} C ${a.x - r * 2.2} ${a.y - r * 2.8}, ${a.x + r * 2.2} ${a.y - r * 2.8}, ${a.x + r * 0.6} ${a.y - r * 0.8}`;
+    }
     if (S.mode === "flowchart") {
       const dy = b.y - a.y, dx = b.x - a.x;
       if (edge && edge.back) {

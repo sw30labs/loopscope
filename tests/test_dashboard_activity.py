@@ -29,6 +29,11 @@ DASHBOARD = Path(__file__).parents[1] / "loopscope" / "static" / "dashboard.html
         "handoff",
         "isolation",
         "nested",
+        "compact_nodes",
+        "marker_handoff",
+        "marker_replay",
+        "marker_state_reset",
+        "compact_update",
         "navigation",
     ],
 )
